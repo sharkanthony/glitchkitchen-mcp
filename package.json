@@ -1,0 +1,24 @@
+{
+  "name": "glitchkitchen-mcp",
+  "version": "1.0.0",
+  "description": "GlitchKitchen effects as MCP tools — native pixel pipeline, no browser",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node src/index.js",
+    "start:remote": "node src/remote.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bin": {
+    "glitchkitchen-mcp": "./src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.2.1",
+    "sharp": "^0.35.3",
+    "zod": "^4.4.3"
+  }
+}
