@@ -275,6 +275,7 @@ function x402Gate(req, res, next) {
 
 // ---------- express app ----------
 const app = express();
+app.set('trust proxy', true); // Railway terminates TLS at the edge; read X-Forwarded-Proto for req.protocol
 app.use(express.json({ limit: `${Math.ceil(MAX_INPUT_BYTES / (1024 * 1024)) + 10}mb` }));
 
 app.get('/healthz', (_req, res) => res.json({ ok: true, name: 'glitchkitchen-mcp', version: '1.0.0' }));
