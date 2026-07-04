@@ -34,6 +34,10 @@ claude mcp add glitchkitchen -- node /absolute/path/to/glitchkitchen-mcp/src/ind
 
 Docs: https://docs.claude.com/en/docs/claude-code/overview
 
+## Where images go
+
+When `output_path` is omitted, generated images are written to `~/Downloads/GlitchKitchen_PFPs/` (created automatically on first use) instead of the OS temp folder — so anything an agent generates from nothing (no `input_path`) is easy to find afterward. Override the location with the `GK_OUTPUT_DIR` environment variable. Passing an explicit `output_path` always takes precedence, and edits to an existing image (`input_path` set) still default to writing next to the source file.
+
 ## Tools
 
 | Tool | What it does |

@@ -6,6 +6,7 @@ import { z } from 'zod';
 import sharp from 'sharp';
 import path from 'node:path';
 import os from 'node:os';
+import fs from 'node:fs';
 import { EFFECTS, PRESETS, applyChain } from './effects/engine.js';
 import { generateSource } from './source.js';
 import { validateChain } from './params.js';
@@ -13,6 +14,7 @@ import { generatePfp, PFP_TEMPERATURES, PFP_INTENSITIES } from './pfp.js';
 import crypto from 'node:crypto';
 
 const MAX_DIM = 4096;
+const DEFAULT_OUTPUT_DIR = process.env.GK_OUTPUT_DIR || path.join(os.homedir(), 'Downloads', 'GlitchKitchen_PFPs');
 
 async function loadImage(inputPath) {
   const base = sharp(inputPath, { limitInputPixels: MAX_DIM * MAX_DIM * 4 })
@@ -33,7 +35,8 @@ async function saveImage(img, outputPath) {
 
 function defaultOutputPath(inputPath, tag) {
   if (!inputPath) {
-    return path.join(os.tmpdir(), `gk-${tag}-${Date.now()}.png`);
+    fs.mkdirSync(DEFAULT_OUTPUT_DIR, { recursive: true });
+    return path.join(DEFAULT_OUTPUT_DIR, `gk-${tag}-${Date.now()}.png`);
   }
   const dir = path.dirname(inputPath);
   const ext = path.extname(inputPath) || '.png';
