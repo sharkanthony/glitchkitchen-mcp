@@ -219,19 +219,58 @@ function buildServer() {
   return server;
 }
 
-// ---------- payment gate (OKX Payment SDK slot) ----------
-// TODO(okx): integrate the OKX Payment SDK here per ASP requirements.
-// This stub enforces a shared-secret header when GK_API_KEY is set, so the
-// endpoint isn't wide open during testing. Replace with per-call metering.
-function paymentGuard(req, res, next) {
-  const key = process.env.GK_API_KEY;
-  if (!key) return next(); // open mode for local testing
-  if (req.headers['x-api-key'] === key) return next();
-  res.status(402).json({
-    jsonrpc: '2.0',
-    error: { code: -32001, message: 'Payment required: missing or invalid x-api-key' },
-    id: null,
-  });
+// ---------- x402 payment gate ----------
+// Per OKX ASP marketplace requirements: every request without payment proof —
+// on every HTTP method, not just POST — must get HTTP 402 carrying the payment
+// requirements, matching the listing's chain/asset/price exactly. Actual
+// verification + settlement of an incoming payment authorization is a separate
+// piece of work, not yet implemented — until then every request is challenged.
+const X402_NETWORK = 'eip155:196'; // X Layer
+const X402_ASSET = '0x779ded0c9e1022225f8e0630b35a9b54be713736'; // USDT (USD₮0), 6 decimals
+const X402_ASSET_DECIMALS = 6;
+const X402_ASSET_NAME = 'USD₮0';
+const X402_ASSET_VERSION = '2';
+const X402_PAY_TO = '0xcedd70af6828ff5c7127adc90a4d80d886e21dfe'; // registered ASP wallet
+const X402_MAX_AMOUNT_REQUIRED = '10000'; // 0.01 USDT in minimal units (6 decimals)
+const X402_MAX_TIMEOUT_SECONDS = 60;
+
+function build402Payload(req) {
+  const resource = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+  return {
+    x402Version: 1,
+    error: 'Payment required',
+    accepts: [
+      {
+        scheme: 'exact',
+        network: X402_NETWORK,
+        maxAmountRequired: X402_MAX_AMOUNT_REQUIRED,
+        resource,
+        description: 'Generative Glitch PFP Engine — one glitch-art PFP per call',
+        mimeType: 'application/json',
+        payTo: X402_PAY_TO,
+        maxTimeoutSeconds: X402_MAX_TIMEOUT_SECONDS,
+        asset: X402_ASSET,
+        decimals: X402_ASSET_DECIMALS,
+        extra: { name: X402_ASSET_NAME, version: X402_ASSET_VERSION, symbol: 'USDT' },
+      },
+    ],
+  };
+}
+
+// TODO(okx): verify the incoming payment authorization (EIP-3009 'exact' scheme)
+// against build402Payload()'s terms and settle it on-chain. Not implemented —
+// always returns false, so every request is challenged until this is wired in.
+function verifyPayment(_req) {
+  return false;
+}
+
+function x402Gate(req, res, next) {
+  if (verifyPayment(req)) return next();
+  const payload = build402Payload(req);
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64');
+  res.status(402);
+  res.set('PAYMENT-REQUIRED', payloadB64);
+  res.json(payload);
 }
 
 // ---------- express app ----------
@@ -240,7 +279,9 @@ app.use(express.json({ limit: `${Math.ceil(MAX_INPUT_BYTES / (1024 * 1024)) + 10
 
 app.get('/healthz', (_req, res) => res.json({ ok: true, name: 'glitchkitchen-mcp', version: '1.0.0' }));
 
-app.post('/mcp', paymentGuard, async (req, res) => {
+// The x402 challenge applies to every method on /mcp (GET/HEAD probes included).
+// Only a verified payment reaches the actual MCP handler below.
+app.post('/mcp', x402Gate, async (req, res) => {
   // Stateless mode: new server + transport per request, no session tracking.
   try {
     const server = buildServer();
@@ -256,13 +297,10 @@ app.post('/mcp', paymentGuard, async (req, res) => {
   }
 });
 
-// GET/DELETE /mcp are for stateful sessions; not supported in stateless mode.
-app.get('/mcp', (_req, res) => res.status(405).json({
-  jsonrpc: '2.0', error: { code: -32000, message: 'Stateless server: POST only' }, id: null,
-}));
-app.delete('/mcp', (_req, res) => res.status(405).json({
-  jsonrpc: '2.0', error: { code: -32000, message: 'Stateless server: POST only' }, id: null,
-}));
+app.get('/mcp', x402Gate);
+app.delete('/mcp', x402Gate);
+// Catch-all: any other HTTP method on /mcp is challenged too, never a 404/405.
+app.all('/mcp', x402Gate);
 
 app.listen(PORT, () => {
   console.error(`glitchkitchen-mcp remote listening on :${PORT} (POST /mcp)`);
