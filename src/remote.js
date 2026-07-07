@@ -238,6 +238,36 @@ const facilitatorClient = new OKXFacilitatorClient({
 });
 
 const resourceServer = new x402ResourceServer(facilitatorClient).register(X402_NETWORK, new ExactEvmScheme());
+
+// Debug logging (per OKX's own debugging playbook): capture the exact decoded
+// payload/requirements plus the real rejection reason on any verify/settle
+// failure, and a one-line confirmation on success. safeJson guards against
+// non-JSON-serializable values (e.g. BigInt) inside SDK objects.
+function safeJson(obj) {
+  try {
+    return JSON.stringify(obj, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+  } catch (err) {
+    return `<unserializable: ${err.message}>`;
+  }
+}
+resourceServer
+  .onVerifyFailure(async (ctx) => {
+    console.error('[x402] VERIFY FAILED:', ctx.error?.message || ctx.error);
+    console.error('[x402]   requirements:', safeJson(ctx.requirements));
+    console.error('[x402]   paymentPayload:', safeJson(ctx.paymentPayload));
+  })
+  .onAfterVerify(async (ctx) => {
+    console.error('[x402] verify ok:', safeJson(ctx.result));
+  })
+  .onSettleFailure(async (ctx) => {
+    console.error('[x402] SETTLE FAILED:', ctx.error?.message || ctx.error);
+    console.error('[x402]   requirements:', safeJson(ctx.requirements));
+    console.error('[x402]   paymentPayload:', safeJson(ctx.paymentPayload));
+  })
+  .onAfterSettle(async (ctx) => {
+    console.error('[x402] settle ok:', safeJson(ctx.result));
+  });
+
 await resourceServer.initialize(); // fetches supported kinds from the facilitator
 
 // No method prefix on the route key = matches every HTTP verb, so GET/HEAD/DELETE
@@ -263,6 +293,15 @@ app.set('trust proxy', true); // Railway terminates TLS at the edge; read X-Forw
 app.use(express.json({ limit: `${Math.ceil(MAX_INPUT_BYTES / (1024 * 1024)) + 10}mb` }));
 
 app.get('/healthz', (_req, res) => res.json({ ok: true, name: 'glitchkitchen-mcp', version: '1.0.0' }));
+
+// Per OKX's debugging playbook: log the raw inbound payment header exactly as
+// received, before any SDK parsing, so a malformed/garbled proof (that never
+// even reaches the verify/settle hooks below) is still visible.
+app.use((req, _res, next) => {
+  const raw = req.get('payment-signature') || req.get('x-payment');
+  if (raw) console.error('[x402] raw inbound header:', raw);
+  next();
+});
 
 // Gates every method on /mcp (GET/HEAD probes included) — verifies payment
 // signature, calls next() into the real handler below, and settles on-chain
