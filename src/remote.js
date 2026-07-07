@@ -20,6 +20,9 @@ import { generateSource } from './source.js';
 import { generatePfp, PFP_TEMPERATURES, PFP_INTENSITIES } from './pfp.js';
 import crypto from 'node:crypto';
 import { validateChain, MAX_CHAIN_STEPS } from './params.js';
+import { paymentMiddleware, x402ResourceServer } from '@okxweb3/x402-express';
+import { ExactEvmScheme } from '@okxweb3/x402-evm/exact/server';
+import { OKXFacilitatorClient } from '@okxweb3/x402-core';
 
 const PORT = Number(process.env.PORT || 3333);
 const MAX_DIM = Number(process.env.GK_MAX_DIM || 2048); // remote cap, stricter than local
@@ -220,58 +223,39 @@ function buildServer() {
 }
 
 // ---------- x402 payment gate ----------
-// Per OKX ASP marketplace requirements: every request without payment proof —
-// on every HTTP method, not just POST — must get HTTP 402 carrying the payment
-// requirements, matching the listing's chain/asset/price exactly. Actual
-// verification + settlement of an incoming payment authorization is a separate
-// piece of work, not yet implemented — until then every request is challenged.
+// Official OKX Payment SDK: verification + on-chain settlement (EIP-3009
+// 'exact' scheme, X Layer) happen on OKX's hosted facilitator — no local
+// wallet/gas needed here. Credentials are an OKX Developer Portal API key.
 const X402_NETWORK = 'eip155:196'; // X Layer
-const X402_ASSET = '0x779ded0c9e1022225f8e0630b35a9b54be713736'; // USDT (USD₮0), 6 decimals
-const X402_ASSET_DECIMALS = 6;
-const X402_ASSET_NAME = 'USD₮0';
-const X402_ASSET_VERSION = '2';
 const X402_PAY_TO = '0xcedd70af6828ff5c7127adc90a4d80d886e21dfe'; // registered ASP wallet
-const X402_MAX_AMOUNT_REQUIRED = '10000'; // 0.01 USDT in minimal units (6 decimals)
+const X402_PRICE = '$0.01'; // resolves to the default X Layer USDT (USD₮0), 6 decimals, per the SDK
 const X402_MAX_TIMEOUT_SECONDS = 60;
 
-function build402Payload(req) {
-  const resource = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
-  return {
-    x402Version: 1,
-    error: 'Payment required',
-    accepts: [
-      {
-        scheme: 'exact',
-        network: X402_NETWORK,
-        maxAmountRequired: X402_MAX_AMOUNT_REQUIRED,
-        resource,
-        description: 'Generative Glitch PFP Engine — one glitch-art PFP per call',
-        mimeType: 'application/json',
-        payTo: X402_PAY_TO,
-        maxTimeoutSeconds: X402_MAX_TIMEOUT_SECONDS,
-        asset: X402_ASSET,
-        decimals: X402_ASSET_DECIMALS,
-        extra: { name: X402_ASSET_NAME, version: X402_ASSET_VERSION, symbol: 'USDT' },
-      },
-    ],
-  };
-}
+const facilitatorClient = new OKXFacilitatorClient({
+  apiKey: process.env.OKX_API_KEY,
+  secretKey: process.env.OKX_SECRET_KEY,
+  passphrase: process.env.OKX_PASSPHRASE,
+});
 
-// TODO(okx): verify the incoming payment authorization (EIP-3009 'exact' scheme)
-// against build402Payload()'s terms and settle it on-chain. Not implemented —
-// always returns false, so every request is challenged until this is wired in.
-function verifyPayment(_req) {
-  return false;
-}
+const resourceServer = new x402ResourceServer(facilitatorClient).register(X402_NETWORK, new ExactEvmScheme());
+await resourceServer.initialize(); // fetches supported kinds from the facilitator
 
-function x402Gate(req, res, next) {
-  if (verifyPayment(req)) return next();
-  const payload = build402Payload(req);
-  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64');
-  res.status(402);
-  res.set('PAYMENT-REQUIRED', payloadB64);
-  res.json(payload);
-}
+// No method prefix on the route key = matches every HTTP verb, so GET/HEAD/DELETE
+// probes get the identical SDK-built 402 challenge as POST — required by the
+// OKX ASP marketplace review (every method must be challenged, not just POST).
+const x402Routes = {
+  '/mcp': {
+    accepts: {
+      scheme: 'exact',
+      network: X402_NETWORK,
+      payTo: X402_PAY_TO,
+      price: X402_PRICE,
+      maxTimeoutSeconds: X402_MAX_TIMEOUT_SECONDS,
+    },
+    description: 'Generative Glitch PFP Engine — one glitch-art PFP per call',
+    mimeType: 'application/json',
+  },
+};
 
 // ---------- express app ----------
 const app = express();
@@ -280,9 +264,13 @@ app.use(express.json({ limit: `${Math.ceil(MAX_INPUT_BYTES / (1024 * 1024)) + 10
 
 app.get('/healthz', (_req, res) => res.json({ ok: true, name: 'glitchkitchen-mcp', version: '1.0.0' }));
 
-// The x402 challenge applies to every method on /mcp (GET/HEAD probes included).
-// Only a verified payment reaches the actual MCP handler below.
-app.post('/mcp', x402Gate, async (req, res) => {
+// Gates every method on /mcp (GET/HEAD probes included) — verifies payment
+// signature, calls next() into the real handler below, and settles on-chain
+// via the OKX facilitator only after that handler responds with status < 400
+// (so a failed generation is never charged).
+app.use(paymentMiddleware(x402Routes, resourceServer));
+
+app.post('/mcp', async (req, res) => {
   // Stateless mode: new server + transport per request, no session tracking.
   try {
     const server = buildServer();
@@ -298,10 +286,12 @@ app.post('/mcp', x402Gate, async (req, res) => {
   }
 });
 
-app.get('/mcp', x402Gate);
-app.delete('/mcp', x402Gate);
-// Catch-all: any other HTTP method on /mcp is challenged too, never a 404/405.
-app.all('/mcp', x402Gate);
+// Safety net: only reachable if a payment was somehow verified on a non-POST
+// method (the MCP transport itself is POST-only) — should never happen in
+// practice, but avoids a bare 404 after a buyer was actually charged.
+app.all('/mcp', (_req, res) => {
+  res.status(400).json({ error: 'MCP requires POST' });
+});
 
 app.listen(PORT, () => {
   console.error(`glitchkitchen-mcp remote listening on :${PORT} (POST /mcp)`);
